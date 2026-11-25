@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { Client, GatewayIntentBits, SlashCommandBuilder, PermissionFlagsBits, InteractionContextType } from 'discord.js';
 import pg from 'pg';
+import { commerce } from './commerce.js';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 
@@ -23,7 +24,8 @@ const clean=s=>String(s).replace(/[\r\n]/g,' ').replace(/[@`*_~|<>]/g,'');
 const safeReply=async(i,content)=>i.editReply({content:String(content).slice(0,1900),allowedMentions:{parse:[]}});
 const transaction=async fn=>{const db=await pool.connect();try{await db.query('BEGIN');const r=await fn(db);await db.query('COMMIT');return r;}catch(e){await db.query('ROLLBACK');throw e;}finally{db.release();}};
 class UserError extends Error {}
-bot.once('clientReady',async()=>{try{await bot.application.commands.set([cmd.toJSON()]);console.log('MarketFlow online');}catch(e){console.error('Command registration failed',e.message);process.exit(1);}});
+const market=commerce(pool,bot,transaction);
+bot.once('clientReady',async()=>{try{await bot.application.commands.set([cmd.toJSON(),market.command.toJSON()]);console.log('MarketFlow online');}catch(e){console.error('Command registration failed',e.message);process.exit(1);}});
 bot.on('interactionCreate',async i=>{
  if(!i.isChatInputCommand()||i.commandName!=='store'||!i.inGuild())return;
  const a=i.options.getSubcommand(), g=i.guildId,u=i.user.id;
@@ -33,7 +35,7 @@ bot.on('interactionCreate',async i=>{
  await i.deferReply({flags:64});
  if(adminActions.has(a)&&!admin)throw new UserError('Manage Server permission required.');
  if(a==='setup'){
- const r=await pool.query('INSERT INTO stores VALUES ($1,$2) ON CONFLICT DO NOTHING RETURNING currency',[g,s('currency')]);
+ const r=await pool.query('INSERT INTO stores(guild_id,currency) VALUES ($1,$2) ON CONFLICT DO NOTHING RETURNING currency',[g,s('currency')]);
  return await safeReply(i,r.rowCount?'Store initialized.':'Store already initialized; currency is locked.');
  }
  const store=(await pool.query('SELECT currency FROM stores WHERE guild_id=$1',[g])).rows[0];
@@ -42,7 +44,7 @@ bot.on('interactionCreate',async i=>{
  const product=()=>{const v=s('product');if(!/^[1-9][0-9]{0,18}$/.test(v)||BigInt(v)>9223372036854775807n)throw new UserError('Invalid product ID.');return v;};
  const order=()=>{const v=s('order');if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v))throw new UserError('Invalid order ID.');return v;};
  if(a==='product-add'){
- const r=await pool.query('INSERT INTO products(guild_id,name,category,price,stock) VALUES($1,$2,$3,$4,$5) RETURNING id',[g,s('name'),s('category'),n('price'),n('stock')]);
+ const r=await transaction(async db=>{await db.query('SELECT guild_id FROM stores WHERE guild_id=$1 FOR UPDATE',[g]);const count=(await db.query('SELECT count(*)::int AS n FROM products WHERE guild_id=$1',[g])).rows[0].n;const plan=(await db.query('SELECT premium_until>now() AS active FROM store_settings WHERE guild_id=$1',[g])).rows[0];if(count>=10&&!plan?.active)throw new UserError('Free plan allows 10 products.');return db.query('INSERT INTO products(guild_id,name,category,price,stock) VALUES($1,$2,$3,$4,$5) RETURNING id',[g,s('name'),s('category'),n('price'),n('stock')]);});
  return await safeReply(i,'Product created: #'+r.rows[0].id);
  }
  if(a==='product-stock'){
@@ -58,7 +60,7 @@ bot.on('interactionCreate',async i=>{
  const result=await transaction(async db=>{
  // Serialize cart modifications per guild and user.
  await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[g+':'+u]);
- if(a==='cart-clear'){await db.query('DELETE FROM carts WHERE guild_id=$1 AND user_id=$2',[g,u]);return 'Cart cleared.';}
+ if(a==='cart-clear'){await db.query('DELETE FROM carts WHERE guild_id=$1 AND user_id=$2',[g,u]);await db.query('DELETE FROM cart_coupons WHERE guild_id=$1 AND user_id=$2',[g,u]);return 'Cart cleared.';}
  if(a==='cart-add'){
  const p=(await db.query('SELECT stock FROM products WHERE guild_id=$1 AND id=$2',[g,product()])).rows[0];
  if(!p||p.stock<n('quantity'))throw new UserError('Product unavailable or insufficient stock.');
@@ -68,13 +70,16 @@ bot.on('interactionCreate',async i=>{
  if(!rows.length)throw new UserError('Your cart is empty.');
  let total=0n;
  for(const p of rows){if(p.stock<p.quantity)throw new UserError('Insufficient stock for '+clean(p.name));total+=BigInt(p.price)*BigInt(p.quantity);}
+ const coupon=(await db.query('SELECT c.code,c.percent,c.remaining,c.expires_at FROM cart_coupons x JOIN coupons c ON c.guild_id=x.guild_id AND c.code=x.code WHERE x.guild_id=$1 AND x.user_id=$2 FOR UPDATE OF c',[g,u])).rows[0];
+ let discount=0n;if(coupon){if(coupon.remaining<=0||new Date(coupon.expires_at)<=new Date())throw new UserError('Coupon expired or exhausted. Clear and rebuild cart.');discount=total*BigInt(coupon.percent)/100n;await db.query('UPDATE coupons SET remaining=remaining-1 WHERE guild_id=$1 AND code=$2',[g,coupon.code]);total-=discount;}
  const id=randomUUID();
- await db.query("INSERT INTO orders(id,guild_id,user_id,currency,total,status) VALUES($1,$2,$3,$4,$5,'pending')",[id,g,u,c,total.toString()]);
+ await db.query("INSERT INTO orders(id,guild_id,user_id,currency,total,status,coupon_code,discount) VALUES($1,$2,$3,$4,$5,'pending',$6,$7)",[id,g,u,c,total.toString(),coupon?.code??null,discount.toString()]);
  for(const p of rows){
  await db.query('UPDATE products SET stock=stock-$2 WHERE id=$1 AND guild_id=$3',[p.id,p.quantity,g]);
- await db.query('INSERT INTO order_items VALUES($1,$2,$3,$4,$5)',[id,p.id,p.name,p.price,p.quantity]);
+ const d=(await db.query('SELECT kind,value,days FROM delivery_config WHERE guild_id=$1 AND product_id=$2',[g,p.id])).rows[0];await db.query('INSERT INTO order_items(order_id,product_id,name,price,quantity,delivery_kind,delivery_value,delivery_days) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[id,p.id,p.name,p.price,p.quantity,d?.kind||'manual',d?.value||'',d?.days||0]);
  }
  await db.query('DELETE FROM carts WHERE guild_id=$1 AND user_id=$2',[g,u]);
+ await db.query('DELETE FROM cart_coupons WHERE guild_id=$1 AND user_id=$2',[g,u]);
  return 'Order '+id+' | '+money(c,total)+' | Pending payment. Contact the store administrator for payment instructions. Stock reserved.';
  });
  return await safeReply(i,result);
@@ -89,14 +94,15 @@ bot.on('interactionCreate',async i=>{
  }
  if(a==='approve'||a==='cancel'){
  const result=await transaction(async db=>{
- const o=(await db.query('SELECT id,status FROM orders WHERE guild_id=$1 AND id=$2 FOR UPDATE',[g,order()])).rows[0];
+ const o=(await db.query('SELECT id,status,coupon_code FROM orders WHERE guild_id=$1 AND id=$2 FOR UPDATE',[g,order()])).rows[0];
  if(!o||o.status!=='pending')throw new UserError('Pending order not found.');
  if(a==='cancel'){
+ const payment=await db.query('SELECT 1 FROM payment_attempts WHERE order_id=$1',[o.id]);if(payment.rowCount)throw new UserError('Payment attempt exists; reconcile provider before cancellation.');if(o.coupon_code)await db.query('UPDATE coupons SET remaining=remaining+1 WHERE guild_id=$1 AND code=$2',[g,o.coupon_code]);
  const items=(await db.query('SELECT product_id,quantity FROM order_items WHERE order_id=$1 ORDER BY product_id',[o.id])).rows;
  for(const p of items)await db.query('UPDATE products SET stock=stock+$2 WHERE id=$1 AND guild_id=$3',[p.product_id,p.quantity,g]);
  }
  await db.query('UPDATE orders SET status=$2 WHERE id=$1 AND guild_id=$3',[o.id,a==='approve'?'paid':'cancelled',g]);
- return a==='approve'?'Payment marked verified. Fulfill manually.':'Order cancelled; inventory restored.';
+ return a==='approve'?'Payment marked verified. Automated items are available via /market claim; manual items require staff.':'Order cancelled; inventory restored.';
  });
  return await safeReply(i,result);
  }
