@@ -1,4 +1,6 @@
 # Changelog
+## 0.2.3
+Added Stripe test-only reconciliation, payment holds, optional manual order expiry, encrypted license storage, regression tests, Docker and community documentation.
 ## 0.2.2
 Removed premium gates, product and coupon limits, and premium commands.
 ## 0.2.1
