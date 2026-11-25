@@ -1,4 +1,5 @@
 import express from 'express';
+import { licenseHash } from './licenses.js';
 import { timingSafeEqual, createHash } from 'node:crypto';
 const digest=x=>createHash('sha256').update(x).digest();
 export function startApi(pool,configure){
@@ -12,7 +13,7 @@ export function startApi(pool,configure){
  app.get('/health',wrap(async(req,res)=>{await pool.query('SELECT 1');res.json({status:'ok'});}));
  app.post('/api/licenses/validate',wrap(async(req,res)=>{
  const key=req.body?.key;if(typeof key!=='string'||!/^MF-[a-f0-9]{48}$/.test(key))return res.json({valid:false});
- const r=await pool.query("SELECT e.expires_at,e.product_id,o.guild_id FROM entitlements e JOIN orders o ON o.id=e.order_id WHERE e.kind='license' AND e.value=$1 AND NOT e.revoked AND o.status='paid' AND NOT o.payment_hold AND (e.expires_at IS NULL OR e.expires_at>now()) LIMIT 1",[key]);
+ const r=await pool.query("SELECT e.expires_at,e.product_id,o.guild_id FROM entitlements e JOIN orders o ON o.id=e.order_id WHERE e.kind='license' AND e.license_hash=$1 AND NOT e.revoked AND o.status='paid' AND NOT o.payment_hold AND (e.expires_at IS NULL OR e.expires_at>now()) LIMIT 1",[licenseHash(key)]);
  res.set('Cache-Control','no-store').json(r.rowCount?{valid:true,product:r.rows[0].product_id,guild:r.rows[0].guild_id,expiresAt:r.rows[0].expires_at}:{valid:false});
  }));
  app.get('/api/admin/:guild/summary',admin,wrap(async(req,res)=>{
