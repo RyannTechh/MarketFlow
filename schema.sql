@@ -25,3 +25,17 @@ ALTER TABLE store_settings ADD COLUMN IF NOT EXISTS support_role text;
 ALTER TABLE entitlements ADD COLUMN IF NOT EXISTS role_granted boolean NOT NULL DEFAULT false;
 
 ALTER TABLE store_settings DROP COLUMN IF EXISTS premium_until;
+
+-- Payment lifecycle: preserve historical order and stock records.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_hold boolean NOT NULL DEFAULT false;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_hold_reason text;
+ALTER TABLE payment_attempts ADD COLUMN IF NOT EXISTS payment_intent_id text;
+ALTER TABLE payment_attempts ADD COLUMN IF NOT EXISTS last_checked_at timestamptz;
+CREATE INDEX IF NOT EXISTS orders_pending_expiry ON orders(created_at) WHERE status='pending';
+CREATE INDEX IF NOT EXISTS payment_intent_lookup ON payment_attempts(account,payment_intent_id);
+CREATE INDEX IF NOT EXISTS payment_attempts_reconciliation ON payment_attempts(last_checked_at);
+CREATE TABLE IF NOT EXISTS payment_incidents (
+ account text NOT NULL, payment_intent_id text NOT NULL, event_id text NOT NULL,
+ reason text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(account,payment_intent_id,event_id)
+);
