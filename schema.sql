@@ -20,3 +20,6 @@ ALTER TABLE order_items ADD COLUMN IF NOT EXISTS delivery_kind text NOT NULL DEF
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS delivery_value text NOT NULL DEFAULT '';
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS delivery_days integer NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS entitlements_expiry ON entitlements(expires_at) WHERE revoked=false;
+
+ALTER TABLE store_settings ADD COLUMN IF NOT EXISTS support_role text;
+ALTER TABLE entitlements ADD COLUMN IF NOT EXISTS role_granted boolean NOT NULL DEFAULT false;
