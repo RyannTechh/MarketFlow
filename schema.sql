@@ -39,3 +39,6 @@ CREATE TABLE IF NOT EXISTS payment_incidents (
  reason text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY(account,payment_intent_id,event_id)
 );
+
+ALTER TABLE entitlements ADD COLUMN IF NOT EXISTS license_hash text;
+CREATE UNIQUE INDEX IF NOT EXISTS entitlements_license_hash ON entitlements(license_hash) WHERE license_hash IS NOT NULL;
