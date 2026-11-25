@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import { Client, GatewayIntentBits, SlashCommandBuilder, PermissionFlagsBits, InteractionContextType } from 'discord.js';
 import pg from 'pg';
+import { startApi } from './api.js';
+import { payments } from './payments.js';
 import { commerce } from './commerce.js';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -25,7 +27,8 @@ const safeReply=async(i,content)=>i.editReply({content:String(content).slice(0,1
 const transaction=async fn=>{const db=await pool.connect();try{await db.query('BEGIN');const r=await fn(db);await db.query('COMMIT');return r;}catch(e){await db.query('ROLLBACK');throw e;}finally{db.release();}};
 class UserError extends Error {}
 const market=commerce(pool,bot,transaction);
-bot.once('clientReady',async()=>{try{await bot.application.commands.set([cmd.toJSON(),market.command.toJSON()]);console.log('MarketFlow online');}catch(e){console.error('Command registration failed',e.message);process.exit(1);}});
+let paymentCommand;
+bot.once('clientReady',async()=>{try{await bot.application.commands.set([cmd.toJSON(),market.command.toJSON(),paymentCommand.toJSON()]);console.log('MarketFlow online');}catch(e){console.error('Command registration failed',e.message);process.exit(1);}});
 bot.on('interactionCreate',async i=>{
  if(!i.isChatInputCommand()||i.commandName!=='store'||!i.inGuild())return;
  const a=i.options.getSubcommand(), g=i.guildId,u=i.user.id;
@@ -96,6 +99,7 @@ bot.on('interactionCreate',async i=>{
  const result=await transaction(async db=>{
  const o=(await db.query('SELECT id,status,coupon_code FROM orders WHERE guild_id=$1 AND id=$2 FOR UPDATE',[g,order()])).rows[0];
  if(!o||o.status!=='pending')throw new UserError('Pending order not found.');
+ if(a==='approve'){const payment=await db.query('SELECT 1 FROM payment_attempts WHERE order_id=$1',[o.id]);if(payment.rowCount)throw new UserError('Provider payment must be settled by verified webhook.');}
  if(a==='cancel'){
  const payment=await db.query('SELECT 1 FROM payment_attempts WHERE order_id=$1',[o.id]);if(payment.rowCount)throw new UserError('Payment attempt exists; reconcile provider before cancellation.');if(o.coupon_code)await db.query('UPDATE coupons SET remaining=remaining+1 WHERE guild_id=$1 AND code=$2',[g,o.coupon_code]);
  const items=(await db.query('SELECT product_id,quantity FROM order_items WHERE order_id=$1 ORDER BY product_id',[o.id])).rows;
@@ -110,4 +114,5 @@ bot.on('interactionCreate',async i=>{
 });
 if(!process.env.DISCORD_TOKEN||!process.env.DATABASE_URL)throw new Error('Configure DISCORD_TOKEN and DATABASE_URL.');
 await pool.query(await readFile(new URL('../schema.sql',import.meta.url),'utf8'));
+paymentCommand=startApi(pool,app=>payments(pool,bot,app));
 await bot.login(process.env.DISCORD_TOKEN);
