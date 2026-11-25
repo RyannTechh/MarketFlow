@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { Client, GatewayIntentBits, SlashCommandBuilder, PermissionFlagsBits, InteractionContextType } from 'discord.js';
 import pg from 'pg';
+import { cancelLocked } from './order-lifecycle.js';
 import { startApi } from './api.js';
 import { payments } from './payments.js';
 import { commerce } from './commerce.js';
@@ -92,20 +93,19 @@ bot.on('interactionCreate',async i=>{
  return await safeReply(i,r.rows.map(p=>clean(p.name)+' x'+p.quantity+' | '+money(c,p.price*p.quantity)).join('\n')||'Cart empty.');
  }
  if(a==='orders'){
- const r=await pool.query('SELECT id,total,currency,status FROM orders WHERE guild_id=$1 AND ($2::boolean OR user_id=$3) ORDER BY created_at DESC LIMIT 15',[g,Boolean(admin),u]);
- return await safeReply(i,r.rows.map(o=>o.id+' | '+money(o.currency,o.total)+' | '+o.status).join('\n')||'No orders.');
+ const r=await pool.query('SELECT id,total,currency,status,payment_hold FROM orders WHERE guild_id=$1 AND ($2::boolean OR user_id=$3) ORDER BY created_at DESC LIMIT 15',[g,Boolean(admin),u]);
+ return await safeReply(i,r.rows.map(o=>o.id+' | '+money(o.currency,o.total)+' | '+(o.payment_hold?'payment hold':o.status)).join('\n')||'No orders.');
  }
  if(a==='approve'||a==='cancel'){
  const result=await transaction(async db=>{
- const o=(await db.query('SELECT id,status,coupon_code FROM orders WHERE guild_id=$1 AND id=$2 FOR UPDATE',[g,order()])).rows[0];
- if(!o||o.status!=='pending')throw new UserError('Pending order not found.');
+ const o=(await db.query('SELECT id,guild_id,status,coupon_code,payment_hold FROM orders WHERE guild_id=$1 AND id=$2 FOR UPDATE',[g,order()])).rows[0];
+ if(!o||o.status!=='pending'||o.payment_hold)throw new UserError('Pending order not found.');
  if(a==='approve'){const payment=await db.query('SELECT 1 FROM payment_attempts WHERE order_id=$1',[o.id]);if(payment.rowCount)throw new UserError('Provider payment must be settled by verified webhook.');}
  if(a==='cancel'){
- const payment=await db.query('SELECT 1 FROM payment_attempts WHERE order_id=$1',[o.id]);if(payment.rowCount)throw new UserError('Payment attempt exists; reconcile provider before cancellation.');if(o.coupon_code)await db.query('UPDATE coupons SET remaining=remaining+1 WHERE guild_id=$1 AND code=$2',[g,o.coupon_code]);
- const items=(await db.query('SELECT product_id,quantity FROM order_items WHERE order_id=$1 ORDER BY product_id',[o.id])).rows;
- for(const p of items)await db.query('UPDATE products SET stock=stock+$2 WHERE id=$1 AND guild_id=$3',[p.product_id,p.quantity,g]);
- }
- await db.query('UPDATE orders SET status=$2 WHERE id=$1 AND guild_id=$3',[o.id,a==='approve'?'paid':'cancelled',g]);
+ const payment=await db.query('SELECT 1 FROM payment_attempts WHERE order_id=$1',[o.id]);if(payment.rowCount)throw new UserError('Payment attempt exists; reconcile provider before cancellation.');
+ await cancelLocked(db,o);
+ }else await db.query("UPDATE orders SET status='paid' WHERE id=$1",[o.id]);
+ await db.query('INSERT INTO audit_events(guild_id,actor,action,detail) VALUES($1,$2,$3,$4)',[g,u,a,o.id]);
  return a==='approve'?'Payment marked verified. Automated items are available via /market claim; manual items require staff.':'Order cancelled; inventory restored.';
  });
  return await safeReply(i,result);
