@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS stores (guild_id text PRIMARY KEY, currency text NOT NULL CHECK(currency IN ('EUR','USD','GBP')));
+CREATE TABLE IF NOT EXISTS products (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, guild_id text NOT NULL REFERENCES stores(guild_id), name text NOT NULL, category text NOT NULL, price integer NOT NULL CHECK(price>0), stock integer NOT NULL CHECK(stock>=0), UNIQUE(guild_id,id));
+CREATE TABLE IF NOT EXISTS carts (guild_id text NOT NULL,user_id text NOT NULL,product_id bigint NOT NULL,quantity integer NOT NULL CHECK(quantity BETWEEN 1 AND 100),PRIMARY KEY(guild_id,user_id,product_id),FOREIGN KEY(guild_id,product_id) REFERENCES products(guild_id,id));
+CREATE TABLE IF NOT EXISTS orders (id uuid PRIMARY KEY,guild_id text NOT NULL REFERENCES stores(guild_id),user_id text NOT NULL,currency text NOT NULL,total bigint NOT NULL,status text NOT NULL CHECK(status IN ('pending','paid','cancelled')),created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS order_items (order_id uuid NOT NULL REFERENCES orders(id),product_id bigint NOT NULL REFERENCES products(id),name text NOT NULL,price integer NOT NULL,quantity integer NOT NULL,PRIMARY KEY(order_id,product_id));
+CREATE INDEX IF NOT EXISTS orders_guild_user ON orders(guild_id,user_id,created_at);
