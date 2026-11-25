@@ -38,17 +38,44 @@ export function commerce(pool,bot,transaction){
    }
   });
  }
+ // Serialize access reconciliation for each member/role across claims and workers.
+ async function reconcileRole(guildId,userId,roleId){
+  return transaction(async db=>{
+   await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[guildId+':role:'+userId+':'+roleId]);
+   const active=(await db.query("SELECT e.order_id,e.product_id,e.unit FROM entitlements e JOIN orders o ON o.id=e.order_id WHERE o.guild_id=$1 AND o.user_id=$2 AND e.kind='role' AND e.value=$3 AND o.status='paid' AND NOT o.payment_hold AND NOT e.revoked AND (e.expires_at IS NULL OR e.expires_at>now()) ORDER BY e.order_id,e.product_id,e.unit",[guildId,userId,roleId])).rows;
+   const ownership=(await db.query("SELECT 1 FROM entitlements e JOIN orders o ON o.id=e.order_id WHERE o.guild_id=$1 AND o.user_id=$2 AND e.kind='role' AND e.value=$3 AND e.role_granted LIMIT 1",[guildId,userId,roleId])).rowCount>0;
+   const guild=await bot.guilds.fetch(guildId);
+   let member;try{member=await guild.members.fetch({user:userId,force:true});}catch(e){if(e.code===10007)return;throw e;}
+   const role=await guild.roles.fetch(roleId,{force:true});
+   if(!role)return;
+   if(active.length){
+    if(role.id===guild.id||role.managed||!role.editable||role.permissions.bitfield!==0n)return;
+    if(!member.roles.cache.has(role.id)){
+     // Persist ownership before sending the Discord request. If it fails the next
+     // worker retries; only use dedicated commerce roles.
+     // This write is within the same transaction as the following API request.
+     const first=active[0];await db.query('UPDATE entitlements SET role_granted=true WHERE order_id=$1 AND product_id=$2 AND unit=$3',[first.order_id,first.product_id,first.unit]);
+     await member.roles.add(role);
+    }
+    await db.query("UPDATE entitlements e SET delivered_at=now() FROM orders o WHERE e.order_id=o.id AND o.guild_id=$1 AND o.user_id=$2 AND e.kind='role' AND e.value=$3 AND o.status='paid' AND NOT o.payment_hold AND NOT e.revoked AND (e.expires_at IS NULL OR e.expires_at>now())",[guildId,userId,roleId]);
+   }else if(ownership){
+    if(member.roles.cache.has(role.id)){if(!role.editable)throw new Error('Role hierarchy prevents access revocation');await member.roles.remove(role);}
+    await db.query("UPDATE entitlements e SET role_granted=false FROM orders o WHERE e.order_id=o.id AND o.guild_id=$1 AND o.user_id=$2 AND e.kind='role' AND e.value=$3",[guildId,userId,roleId]);
+   }
+   await db.query("UPDATE entitlements e SET revoked=true FROM orders o WHERE e.order_id=o.id AND o.guild_id=$1 AND o.user_id=$2 AND e.kind='role' AND e.value=$3 AND (e.expires_at<=now() OR o.payment_hold OR o.status<>'paid')",[guildId,userId,roleId]);
+  });
+ }
  async function grantRoles(id){
-  const rows=(await q("SELECT e.*,o.guild_id,o.user_id FROM entitlements e JOIN orders o ON o.id=e.order_id WHERE o.id=$1 AND o.status='paid' AND NOT o.payment_hold AND e.kind='role' AND e.revoked=false AND (e.expires_at IS NULL OR e.expires_at>now())",[id])).rows;
-  for(const x of rows){try{const guild=await bot.guilds.fetch(x.guild_id);const member=await guild.members.fetch(x.user_id);const role=await guild.roles.fetch(x.value);if(!role||role.id===guild.id||role.managed||!role.editable||role.permissions.bitfield!==0n)continue;if(!member.roles.cache.has(role.id)){await member.roles.add(role);await q('UPDATE entitlements SET role_granted=true WHERE order_id=$1 AND product_id=$2 AND unit=$3',[id,x.product_id,x.unit]);}await q('UPDATE entitlements SET delivered_at=now() WHERE order_id=$1 AND product_id=$2 AND unit=$3',[id,x.product_id,x.unit]);}catch(e){console.error('Role fulfillment failed',e.code||e.name);}}
+  const rows=(await q("SELECT DISTINCT o.guild_id,o.user_id,e.value FROM entitlements e JOIN orders o ON o.id=e.order_id WHERE o.id=$1 AND o.status='paid' AND NOT o.payment_hold AND e.kind='role' AND NOT e.revoked AND (e.expires_at IS NULL OR e.expires_at>now())",[id])).rows;
+  for(const x of rows){try{await reconcileRole(x.guild_id,x.user_id,x.value);}catch(e){console.error('Role fulfillment failed',e.code||e.name);}}
  }
  async function sweep(){
   const paid=(await q("SELECT DISTINCT o.id FROM orders o JOIN order_items p ON p.order_id=o.id WHERE o.status='paid' AND NOT o.payment_hold AND p.delivery_kind<>'manual' AND NOT EXISTS(SELECT 1 FROM entitlements e WHERE e.order_id=o.id AND e.product_id=p.product_id) LIMIT 50",[])).rows;
   for(const o of paid){await fulfill(o.id);await grantRoles(o.id);}
   const roles=(await q("SELECT DISTINCT o.id FROM orders o JOIN entitlements e ON e.order_id=o.id WHERE o.status='paid' AND NOT o.payment_hold AND e.kind='role' AND e.delivered_at IS NULL AND NOT e.revoked AND (e.expires_at IS NULL OR e.expires_at>now()) LIMIT 50",[])).rows;
   for(const o of roles)await grantRoles(o.id);
-  const expired=(await q("SELECT e.*,o.guild_id,o.user_id FROM entitlements e JOIN orders o ON o.id=e.order_id WHERE e.kind='role' AND (e.expires_at<=now() OR o.payment_hold) AND NOT e.revoked LIMIT 50",[])).rows;
-  for(const e of expired){try{const active=await q("SELECT 1 FROM entitlements x JOIN orders o ON o.id=x.order_id WHERE o.guild_id=$1 AND o.user_id=$2 AND x.kind='role' AND x.value=$3 AND o.status='paid' AND NOT o.payment_hold AND NOT x.revoked AND (x.expires_at IS NULL OR x.expires_at>now()) LIMIT 1",[e.guild_id,e.user_id,e.value]);if(!active.rowCount&&e.role_granted){const guild=await bot.guilds.fetch(e.guild_id);const member=await guild.members.fetch(e.user_id).catch(()=>null);if(member)await member.roles.remove(e.value);}await q('UPDATE entitlements SET revoked=true WHERE order_id=$1 AND product_id=$2 AND unit=$3',[e.order_id,e.product_id,e.unit]);}catch(err){console.error('Expiry failed',err.code||err.name);}}
+  const expired=(await q("SELECT DISTINCT o.guild_id,o.user_id,e.value FROM entitlements e JOIN orders o ON o.id=e.order_id WHERE e.kind='role' AND ((NOT e.revoked AND (e.expires_at<=now() OR o.payment_hold)) OR (e.role_granted AND NOT EXISTS(SELECT 1 FROM entitlements x JOIN orders y ON y.id=x.order_id WHERE y.guild_id=o.guild_id AND y.user_id=o.user_id AND x.kind='role' AND x.value=e.value AND y.status='paid' AND NOT y.payment_hold AND NOT x.revoked AND (x.expires_at IS NULL OR x.expires_at>now())))) LIMIT 50",[])).rows;
+  for(const e of expired){try{await reconcileRole(e.guild_id,e.user_id,e.value);}catch(err){console.error('Expiry failed',err.code||err.name);}}
  }
  let running=false;bot.once('clientReady',()=>{const tick=async()=>{if(running)return;running=true;try{await sweep();}catch(e){console.error('Fulfillment sweep failed',e.code||e.name);}finally{running=false;}};void tick();setInterval(tick,60000).unref();});
  bot.on('interactionCreate',async i=>{
@@ -71,7 +98,7 @@ export function commerce(pool,bot,transaction){
    if(a==='analytics'){const r=(await q("SELECT count(*)::int AS orders,count(DISTINCT user_id)::int AS customers,coalesce(sum(total),0) AS revenue FROM orders WHERE guild_id=$1 AND status='paid' AND NOT payment_hold",[g])).rows[0];return reply(i,'Paid orders: '+r.orders+' | Customers: '+r.customers+' | Revenue: '+fmt(store.currency,r.revenue));}
    if(a==='support-role'){const role=i.options.getRole('role',true);if(role.id===g)return reply(i,'Everyone cannot be support staff.');await q('INSERT INTO store_settings(guild_id,support_role) VALUES($1,$2) ON CONFLICT(guild_id) DO UPDATE SET support_role=EXCLUDED.support_role',[g,role.id]);await audit(g,u,a,role.id);return reply(i,'Support role configured.');}
    if(a==='support'){const id=s('order');const r=await q('SELECT id FROM orders WHERE guild_id=$1 AND user_id=$2 AND id=$3',[g,u,id]);if(!r.rowCount)return reply(i,'Order not found.');const staff=st.support_role||process.env.SUPPORT_ROLE_ID;if(!staff||staff===g||!await i.guild.roles.fetch(staff))return reply(i,'Support role not configured for this server.');const caseId=randomUUID();const reserved=await transaction(async db=>{await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[g+':support:'+u]);const count=(await db.query('SELECT count(*)::int AS n FROM support_cases WHERE guild_id=$1 AND user_id=$2 AND closed_at IS NULL',[g,u])).rows[0].n;if(count>=3)return false;const exists=await db.query('SELECT 1 FROM support_cases WHERE guild_id=$1 AND order_id=$2 AND closed_at IS NULL',[g,id]);if(exists.rowCount)return false;await db.query('INSERT INTO support_cases(id,guild_id,user_id,order_id) VALUES($1,$2,$3,$4)',[caseId,g,u,id]);return true;});if(!reserved)return reply(i,'An open case already exists or your support limit has been reached.');let ch;try{ch=await i.guild.channels.create({name:'market-support-'+caseId.slice(0,8),type:ChannelType.GuildText,permissionOverwrites:[{id:g,deny:[PermissionFlagsBits.ViewChannel]},{id:u,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages]},{id:staff,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages]},{id:bot.user.id,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages,PermissionFlagsBits.ManageChannels]}]});await q('UPDATE support_cases SET channel_id=$2 WHERE id=$1',[caseId,ch.id]);}catch(err){if(ch)await ch.delete().catch(()=>{});await q('UPDATE support_cases SET closed_at=now() WHERE id=$1',[caseId]);throw err;}return reply(i,'Support channel: <#'+ch.id+'>');}
-   if(a==='support-close'){const r=await q('UPDATE support_cases SET closed_at=now() WHERE guild_id=$1 AND channel_id=$2 AND closed_at IS NULL RETURNING user_id',[g,i.channelId]);if(!r.rowCount)return reply(i,'Not an open support case.');await i.channel.permissionOverwrites.edit(r.rows[0].user_id,{SendMessages:false});return reply(i,'Support case closed.');}
+   if(a==='support-close'){const r=await q('SELECT user_id FROM support_cases WHERE guild_id=$1 AND channel_id=$2 AND closed_at IS NULL',[g,i.channelId]);if(!r.rowCount)return reply(i,'Not an open support case.');await i.channel.permissionOverwrites.edit(r.rows[0].user_id,{SendMessages:false});await q('UPDATE support_cases SET closed_at=now() WHERE guild_id=$1 AND channel_id=$2 AND closed_at IS NULL',[g,i.channelId]);return reply(i,'Support case closed.');}
    if(a==='license-revoke'){const r=await q("UPDATE entitlements e SET revoked=true FROM orders o WHERE e.order_id=o.id AND o.guild_id=$1 AND e.kind='license' AND e.license_hash=$2",[g,licenseHash(s('key'))]);await audit(g,u,a);return reply(i,r.rowCount?'License revoked.':'License not found.');}
   }catch(e){console.error('Market command error',e.code||e.name);if(i.deferred)await reply(i,'Unable to complete request. Check inputs, limits and bot permissions.').catch(()=>{});}
  });
