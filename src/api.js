@@ -3,6 +3,9 @@ import { timingSafeEqual, createHash } from 'node:crypto';
 const digest=x=>createHash('sha256').update(x).digest();
 export function startApi(pool,configure){
  const app=express();app.disable('x-powered-by');const paymentCommand=configure(app);app.use(express.json({limit:'16kb'}));
+ app.use('/api',(req,res,next)=>{res.set('Cache-Control','no-store');next();});
+ const limits=new Map();const cleanup=setInterval(()=>{for(const [key,v] of limits)if(v.until<=Date.now())limits.delete(key);},60000);cleanup.unref();
+ app.use('/api',(req,res,next)=>{const key=req.ip;const now=Date.now();let v=limits.get(key);if(!v||v.until<=now){if(limits.size>=10000&&!limits.has(key))return res.sendStatus(503);v={count:0,until:now+60000};limits.set(key,v);}if(++v.count>120){res.set('Retry-After',String(Math.ceil((v.until-now)/1000)));return res.sendStatus(429);}next();});
  const token=process.env.DASHBOARD_TOKEN;
  const admin=(req,res,next)=>{if(!token||token.length<32||!timingSafeEqual(digest(req.get('authorization')||''),digest('Bearer '+token)))return res.sendStatus(401);next();};
  const wrap=fn=>async(req,res)=>{try{await fn(req,res);}catch(e){console.error('API error',e.code||e.name);res.sendStatus(500);}};
