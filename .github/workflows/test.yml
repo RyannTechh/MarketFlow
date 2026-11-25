@@ -25,10 +25,15 @@ jobs:
       TEST_DATABASE_URL: postgresql://marketflow:ci_test_only@localhost:5432/marketflow_test
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: npm install --ignore-scripts
+      - run: node scripts/check-secrets.mjs
+      - run: if [ -f package-lock.json ]; then npm ci --ignore-scripts; else npm install --ignore-scripts; fi
       - run: npm run check
       - run: npm test
       - run: npm audit --omit=dev --audit-level=high
+      - run: docker build -t marketflow:ci .
