@@ -4,3 +4,19 @@ CREATE TABLE IF NOT EXISTS carts (guild_id text NOT NULL,user_id text NOT NULL,p
 CREATE TABLE IF NOT EXISTS orders (id uuid PRIMARY KEY,guild_id text NOT NULL REFERENCES stores(guild_id),user_id text NOT NULL,currency text NOT NULL,total bigint NOT NULL,status text NOT NULL CHECK(status IN ('pending','paid','cancelled')),created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS order_items (order_id uuid NOT NULL REFERENCES orders(id),product_id bigint NOT NULL REFERENCES products(id),name text NOT NULL,price integer NOT NULL,quantity integer NOT NULL,PRIMARY KEY(order_id,product_id));
 CREATE INDEX IF NOT EXISTS orders_guild_user ON orders(guild_id,user_id,created_at);
+
+CREATE TABLE IF NOT EXISTS store_settings (guild_id text PRIMARY KEY REFERENCES stores(guild_id), brand text NOT NULL DEFAULT 'MarketFlow', color text NOT NULL DEFAULT '5865F2', logo text, support_category text, stripe_account text, paypal_merchant text, premium_until timestamptz);
+CREATE TABLE IF NOT EXISTS coupons (guild_id text REFERENCES stores(guild_id),code text,percent integer NOT NULL CHECK(percent BETWEEN 1 AND 99),remaining integer NOT NULL CHECK(remaining>=0),expires_at timestamptz NOT NULL,PRIMARY KEY(guild_id,code));
+CREATE TABLE IF NOT EXISTS cart_coupons (guild_id text REFERENCES stores(guild_id),user_id text,code text NOT NULL,PRIMARY KEY(guild_id,user_id),FOREIGN KEY(guild_id,code) REFERENCES coupons(guild_id,code));
+CREATE TABLE IF NOT EXISTS delivery_config (guild_id text,product_id bigint,kind text NOT NULL CHECK(kind IN ('link','role','license','manual')),value text NOT NULL DEFAULT '',days integer NOT NULL DEFAULT 0 CHECK(days>=0),PRIMARY KEY(guild_id,product_id),FOREIGN KEY(guild_id,product_id) REFERENCES products(guild_id,id));
+CREATE TABLE IF NOT EXISTS entitlements (order_id uuid REFERENCES orders(id),product_id bigint REFERENCES products(id),unit integer NOT NULL,kind text NOT NULL,value text NOT NULL,expires_at timestamptz,revoked boolean NOT NULL DEFAULT false,delivered_at timestamptz,PRIMARY KEY(order_id,product_id,unit));
+CREATE TABLE IF NOT EXISTS license_activations (license_hash text NOT NULL,device_hash text NOT NULL,activated_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(license_hash,device_hash));
+CREATE TABLE IF NOT EXISTS audit_events (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,guild_id text NOT NULL,actor text NOT NULL,action text NOT NULL,detail text NOT NULL DEFAULT '',created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS payment_attempts (order_id uuid PRIMARY KEY REFERENCES orders(id),provider text NOT NULL,account text NOT NULL,external_id text UNIQUE,checkout_url text,created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS support_cases (id uuid PRIMARY KEY,guild_id text NOT NULL,user_id text NOT NULL,order_id uuid NOT NULL REFERENCES orders(id),channel_id text UNIQUE,closed_at timestamptz);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS coupon_code text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount bigint NOT NULL DEFAULT 0;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS delivery_kind text NOT NULL DEFAULT 'manual';
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS delivery_value text NOT NULL DEFAULT '';
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS delivery_days integer NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS entitlements_expiry ON entitlements(expires_at) WHERE revoked=false;
