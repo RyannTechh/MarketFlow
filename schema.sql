@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS orders (id uuid PRIMARY KEY,guild_id text NOT NULL RE
 CREATE TABLE IF NOT EXISTS order_items (order_id uuid NOT NULL REFERENCES orders(id),product_id bigint NOT NULL REFERENCES products(id),name text NOT NULL,price integer NOT NULL,quantity integer NOT NULL,PRIMARY KEY(order_id,product_id));
 CREATE INDEX IF NOT EXISTS orders_guild_user ON orders(guild_id,user_id,created_at);
 
-CREATE TABLE IF NOT EXISTS store_settings (guild_id text PRIMARY KEY REFERENCES stores(guild_id), brand text NOT NULL DEFAULT 'MarketFlow', color text NOT NULL DEFAULT '5865F2', logo text, support_category text, stripe_account text, paypal_merchant text, premium_until timestamptz);
+CREATE TABLE IF NOT EXISTS store_settings (guild_id text PRIMARY KEY REFERENCES stores(guild_id), brand text NOT NULL DEFAULT 'MarketFlow', color text NOT NULL DEFAULT '5865F2', logo text, support_category text, stripe_account text, paypal_merchant text);
 CREATE TABLE IF NOT EXISTS coupons (guild_id text REFERENCES stores(guild_id),code text,percent integer NOT NULL CHECK(percent BETWEEN 1 AND 99),remaining integer NOT NULL CHECK(remaining>=0),expires_at timestamptz NOT NULL,PRIMARY KEY(guild_id,code));
 CREATE TABLE IF NOT EXISTS cart_coupons (guild_id text REFERENCES stores(guild_id),user_id text,code text NOT NULL,PRIMARY KEY(guild_id,user_id),FOREIGN KEY(guild_id,code) REFERENCES coupons(guild_id,code));
 CREATE TABLE IF NOT EXISTS delivery_config (guild_id text,product_id bigint,kind text NOT NULL CHECK(kind IN ('link','role','license','manual')),value text NOT NULL DEFAULT '',days integer NOT NULL DEFAULT 0 CHECK(days>=0),PRIMARY KEY(guild_id,product_id),FOREIGN KEY(guild_id,product_id) REFERENCES products(guild_id,id));
@@ -23,3 +23,5 @@ CREATE INDEX IF NOT EXISTS entitlements_expiry ON entitlements(expires_at) WHERE
 
 ALTER TABLE store_settings ADD COLUMN IF NOT EXISTS support_role text;
 ALTER TABLE entitlements ADD COLUMN IF NOT EXISTS role_granted boolean NOT NULL DEFAULT false;
+
+ALTER TABLE store_settings DROP COLUMN IF EXISTS premium_until;
