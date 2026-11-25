@@ -2,7 +2,7 @@ import express from 'express';
 import { licenseHash } from './licenses.js';
 import { timingSafeEqual, createHash } from 'node:crypto';
 const digest=x=>createHash('sha256').update(x).digest();
-export function startApi(pool,configure){
+export function createApi(pool,configure){
  const app=express();app.disable('x-powered-by');const paymentCommand=configure(app);app.use(express.json({limit:'16kb'}));
  app.use('/api',(req,res,next)=>{res.set('Cache-Control','no-store');next();});
  const limits=new Map();const cleanup=setInterval(()=>{for(const [key,v] of limits)if(v.until<=Date.now())limits.delete(key);},60000);cleanup.unref();
@@ -23,5 +23,10 @@ export function startApi(pool,configure){
  }));
  app.get('/',(req,res)=>res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>MarketFlow</title></head><body style="background:#101827;color:#e5e7eb;font:16px system-ui;max-width:900px;margin:40px auto;padding:20px"><h1>MarketFlow</h1><p>Operator dashboard — read-only</p><form id="f"><label>Guild ID <input id="g" required></label> <label>Operator token <input id="t" type="password" required></label> <button>Load</button></form><pre id="out" style="white-space:pre-wrap"></pre><script>document.getElementById('f').onsubmit=async e=>{e.preventDefault();const out=document.getElementById('out');try{const r=await fetch('/api/admin/'+encodeURIComponent(document.getElementById('g').value)+'/summary',{headers:{Authorization:'Bearer '+document.getElementById('t').value}});out.textContent=r.ok?JSON.stringify(await r.json(),null,2):'Request failed: '+r.status}catch{out.textContent='Connection failed'}};</script></body></html>`));
  app.get('/payment/success',(req,res)=>res.send('Payment submitted. Check your Discord order status.'));app.get('/payment/cancel',(req,res)=>res.send('Checkout cancelled. Contact the store to reconcile the order.'));
- app.listen(Number(process.env.PORT||3000),process.env.API_HOST||'127.0.0.1',()=>console.log('MarketFlow API listening'));return paymentCommand;
+ return {app,paymentCommand,dispose:()=>clearInterval(cleanup)};
+}
+export function startApi(pool,configure){
+ const {app,paymentCommand,dispose}=createApi(pool,configure);
+ const server=app.listen(Number(process.env.PORT||3000),process.env.API_HOST||'127.0.0.1',()=>console.log('MarketFlow API listening'));
+ server.on('close',dispose);return paymentCommand;
 }

@@ -32,7 +32,7 @@ jobs:
         with:
           node-version: '22'
       - run: node scripts/check-secrets.mjs
-      - run: if [ -f package-lock.json ]; then npm ci --ignore-scripts; else npm install --ignore-scripts; fi
+      - run: npm ci --ignore-scripts
       - run: npm run check
       - run: npm test
       - run: npm audit --omit=dev --audit-level=high
