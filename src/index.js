@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { Client, GatewayIntentBits, SlashCommandBuilder, PermissionFlagsBits, InteractionContextType } from 'discord.js';
 import pg from 'pg';
+import { licenseSecret, migrateLicenses } from './licenses.js';
 import { cancelLocked } from './order-lifecycle.js';
 import { startApi } from './api.js';
 import { payments } from './payments.js';
@@ -114,5 +115,6 @@ bot.on('interactionCreate',async i=>{
 });
 if(!process.env.DISCORD_TOKEN||!process.env.DATABASE_URL)throw new Error('Configure DISCORD_TOKEN and DATABASE_URL.');
 await pool.query(await readFile(new URL('../schema.sql',import.meta.url),'utf8'));
+await migrateLicenses(pool,licenseSecret());
 paymentCommand=startApi(pool,app=>payments(pool,bot,app));
 await bot.login(process.env.DISCORD_TOKEN);
