@@ -47,7 +47,7 @@ bot.on('interactionCreate',async i=>{
  const product=()=>{const v=s('product');if(!/^[1-9][0-9]{0,18}$/.test(v)||BigInt(v)>9223372036854775807n)throw new UserError('Invalid product ID.');return v;};
  const order=()=>{const v=s('order');if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v))throw new UserError('Invalid order ID.');return v;};
  if(a==='product-add'){
- const r=await transaction(async db=>{await db.query('SELECT guild_id FROM stores WHERE guild_id=$1 FOR UPDATE',[g]);const count=(await db.query('SELECT count(*)::int AS n FROM products WHERE guild_id=$1',[g])).rows[0].n;const plan=(await db.query('SELECT premium_until>now() AS active FROM store_settings WHERE guild_id=$1',[g])).rows[0];if(count>=10&&!plan?.active)throw new UserError('Free plan allows 10 products.');return db.query('INSERT INTO products(guild_id,name,category,price,stock) VALUES($1,$2,$3,$4,$5) RETURNING id',[g,s('name'),s('category'),n('price'),n('stock')]);});
+ const r=await transaction(async db=>{await db.query('SELECT guild_id FROM stores WHERE guild_id=$1 FOR UPDATE',[g]);return db.query('INSERT INTO products(guild_id,name,category,price,stock) VALUES($1,$2,$3,$4,$5) RETURNING id',[g,s('name'),s('category'),n('price'),n('stock')]);});
  return await safeReply(i,'Product created: #'+r.rows[0].id);
  }
  if(a==='product-stock'){
