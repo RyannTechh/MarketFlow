@@ -33,6 +33,9 @@ jobs:
           node-version: '22'
       - run: node scripts/check-secrets.mjs
       - run: if [ -f package-lock.json ]; then npm ci --ignore-scripts; else npm install --ignore-scripts; fi
+      - name: Export generated dependency lockfile for review
+        run: |
+          node -e "console.log('MF_LOCK_BEGIN');console.log(require('fs').readFileSync('package-lock.json','utf8'));console.log('MF_LOCK_END')"
       - run: npm run check
       - run: npm test
       - run: npm audit --omit=dev --audit-level=high
